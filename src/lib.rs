@@ -12,7 +12,7 @@ pub mod net {
     pub struct EasySocket {
         tcp_stream: Option<TcpStream>,
         udp_socket: Option<UdpSocket>,
-        ws_stream: Option<WebSocket<TcpStream>>,
+        ws_stream: Option<WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>>,
         handlers: Arc<Mutex<HashMap<String, Box<dyn Fn(&str) + Send>>>>,
     }
 
@@ -38,7 +38,7 @@ pub mod net {
         }
 
         pub fn ws(url: &str) -> tungstenite::Result<Self> {
-            let (ws_stream, _) = connect(Url::parse(url).unwrap())?;
+            let (ws_stream, _) = connect(url)?;
             Ok(Self {
                 tcp_stream: None,
                 udp_socket: None,
@@ -51,7 +51,7 @@ pub mod net {
             if let Some(ref mut tcp) = self.tcp_stream {
                 tcp.write_all(event.as_bytes()).unwrap();
             } else if let Some(ref mut ws) = self.ws_stream {
-                ws.write_message(Message::Text(event.to_string())).unwrap();
+                ws.write_message(Message::Text(event.into())).unwrap();
             }
         }
 
@@ -86,7 +86,7 @@ pub mod net {
                         if let Some(callback) = self.handlers.lock().unwrap().get("message") {
                             callback(&text);
                         }
-                        if let Some(callback) = self.handlers.lock().unwrap().get(&text) {
+                        if let Some(callback) = self.handlers.lock().unwrap().get(text.as_str()) {
                             callback(&text);
                         }
                     }
@@ -133,6 +133,8 @@ pub mod net {
 mod tests {
     use super::net::{EasySocket, http::EasyHttp};
     use std::thread;
+    use std::net::TcpListener;
+    use std::io::Read;
 
     #[test]
     fn test_easy_socket() {
@@ -157,6 +159,7 @@ mod tests {
 
     #[test]
     fn test_easy_http() {
+        use std::io::Write;
         thread::spawn(|| {
             let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
             for stream in listener.incoming() {
