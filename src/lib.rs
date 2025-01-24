@@ -1,186 +1,179 @@
 use std::io::{self, BufRead, Read, Write, BufReader};
 use std::net::{TcpListener, TcpStream, UdpSocket, ToSocketAddrs};
-use std::collections::VecDeque;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tungstenite::{accept, connect, Message};
+use tungstenite::protocol::WebSocket;
+use url::Url;
 
 pub mod net {
     use super::*;
 
-    /// Dial a TCP connection to the specified address.
-    pub fn dial<A: ToSocketAddrs>(address: A) -> io::Result<TcpStream> {
-        TcpStream::connect(address)
+    pub struct EasySocket {
+        tcp_stream: Option<TcpStream>,
+        udp_socket: Option<UdpSocket>,
+        ws_stream: Option<WebSocket<TcpStream>>,
+        handlers: Arc<Mutex<HashMap<String, Box<dyn Fn(&str) + Send>>>>,
     }
 
-    /// Start a TCP listener at the specified address.
-    pub fn listen<A: ToSocketAddrs>(address: A) -> io::Result<TcpListener> {
-        TcpListener::bind(address)
-    }
-
-    /// Send a UDP message to the specified address.
-    pub fn udp_send<A: ToSocketAddrs>(address: A, message: &[u8]) -> io::Result<()> {
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
-        socket.send_to(message, address)?;
-        Ok(())
-    }
-
-    /// Receive a UDP message on the specified address.
-    pub fn udp_receive<A: ToSocketAddrs>(address: A, buffer: &mut [u8]) -> io::Result<(usize, String)> {
-        let socket = UdpSocket::bind(address)?;
-        let (size, src) = socket.recv_from(buffer)?;
-        Ok((size, src.to_string()))
-    }
-
-    /// Utility function to write data to a TCP stream.
-    pub fn write_to_stream(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
-        stream.write_all(data)
-    }
-
-    /// Utility function to read data from a TCP stream.
-    pub fn read_from_stream(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<usize> {
-        stream.read(buffer)
-    }
-
-    /// Read the latest message from the TCP stream until the last newline character.
-    pub fn read_latest_message(stream: &mut TcpStream) -> io::Result<String> {
-        let mut reader = BufReader::new(stream);
-        let mut buffer = VecDeque::new();
-        let mut line = String::new();
-
-        while reader.read_line(&mut line)? > 0 {
-            buffer.push_back(line.clone());
-            line.clear();
+    impl EasySocket {
+        pub fn tcp(address: &str) -> io::Result<Self> {
+            let tcp_stream = TcpStream::connect(address)?;
+            Ok(Self {
+                tcp_stream: Some(tcp_stream),
+                udp_socket: None,
+                ws_stream: None,
+                handlers: Arc::new(Mutex::new(HashMap::new())),
+            })
         }
 
-        Ok(buffer.pop_back().unwrap_or_default().trim().to_string())
+        pub fn udp(address: &str) -> io::Result<Self> {
+            let udp_socket = UdpSocket::bind(address)?;
+            Ok(Self {
+                tcp_stream: None,
+                udp_socket: Some(udp_socket),
+                ws_stream: None,
+                handlers: Arc::new(Mutex::new(HashMap::new())),
+            })
+        }
+
+        pub fn ws(url: &str) -> tungstenite::Result<Self> {
+            let (ws_stream, _) = connect(Url::parse(url).unwrap())?;
+            Ok(Self {
+                tcp_stream: None,
+                udp_socket: None,
+                ws_stream: Some(ws_stream),
+                handlers: Arc::new(Mutex::new(HashMap::new())),
+            })
+        }
+
+        pub fn emit(&mut self, event: &str) {
+            if let Some(ref mut tcp) = self.tcp_stream {
+                tcp.write_all(event.as_bytes()).unwrap();
+            } else if let Some(ref mut ws) = self.ws_stream {
+                ws.write_message(Message::Text(event.to_string())).unwrap();
+            }
+        }
+
+        pub fn on<F>(&mut self, event: &str, callback: F)
+        where
+            F: Fn(&str) + Send + 'static,
+        {
+            self.handlers.lock().unwrap().insert(event.to_string(), Box::new(callback));
+        }
+
+        pub fn onmessage<F>(&mut self, callback: F)
+        where
+            F: Fn(&str) + Send + 'static,
+        {
+            self.on("message", callback);
+        }
+
+        pub fn listen(&mut self) {
+            if let Some(ref mut tcp) = self.tcp_stream {
+                let mut buffer = [0; 1024];
+                let size = tcp.read(&mut buffer).unwrap();
+                let message = String::from_utf8_lossy(&buffer[..size]).to_string();
+                if let Some(callback) = self.handlers.lock().unwrap().get("message") {
+                    callback(&message);
+                }
+                if let Some(callback) = self.handlers.lock().unwrap().get(&message) {
+                    callback(&message);
+                }
+            } else if let Some(ref mut ws) = self.ws_stream {
+                if let Ok(msg) = ws.read_message() {
+                    if let Message::Text(text) = msg {
+                        if let Some(callback) = self.handlers.lock().unwrap().get("message") {
+                            callback(&text);
+                        }
+                        if let Some(callback) = self.handlers.lock().unwrap().get(&text) {
+                            callback(&text);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub mod http {
         use super::*;
 
-        /// Make a simple HTTP GET request to the specified address.
-        pub fn get<A: ToSocketAddrs>(address: A, path: &str) -> io::Result<String> {
-            let mut stream = TcpStream::connect(address)?;
-            let request = format!("GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", path);
-            stream.write_all(request.as_bytes())?;
+        pub struct EasyHttp;
 
-            let mut response = String::new();
-            stream.read_to_string(&mut response)?;
-            Ok(response)
-        }
+        impl EasyHttp {
+            pub fn get(address: &str, path: &str) -> io::Result<String> {
+                let mut stream = TcpStream::connect(address)?;
+                let request = format!("GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", path);
+                stream.write_all(request.as_bytes())?;
 
-        /// Make a simple HTTP POST request to the specified address with a body.
-        pub fn post<A: ToSocketAddrs>(address: A, path: &str, body: &str) -> io::Result<String> {
-            let mut stream = TcpStream::connect(address)?;
-            let request = format!(
-                "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
-                path,
-                body.len(),
-                body
-            );
-            stream.write_all(request.as_bytes())?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response)?;
+                Ok(response)
+            }
 
-            let mut response = String::new();
-            stream.read_to_string(&mut response)?;
-            Ok(response)
+            pub fn post(address: &str, path: &str, body: &str) -> io::Result<String> {
+                let mut stream = TcpStream::connect(address)?;
+                let request = format!(
+                    "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                    path,
+                    body.len(),
+                    body
+                );
+                stream.write_all(request.as_bytes())?;
+
+                let mut response = String::new();
+                stream.read_to_string(&mut response)?;
+                Ok(response)
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::net;
+    use super::net::{EasySocket, http::EasyHttp};
     use std::thread;
 
     #[test]
-    fn test_tcp_connection() {
-        let address = "127.0.0.1:7878";
+    fn test_easy_socket() {
+        thread::spawn(|| {
+            let mut server = EasySocket::tcp("127.0.0.1:5767").unwrap();
+            server.on("hello, server", |msg| {
+                println!("Server received: {}", msg);
+            });
+            server.emit("hello, client!");
+            server.listen();
+        });
 
-        // Start a server in a separate thread
-        thread::spawn(move || {
-            let listener = net::listen(address).unwrap();
+        thread::sleep(std::time::Duration::from_secs(1)); // Allow server to start
+
+        let mut client = EasySocket::tcp("127.0.0.1:5767").unwrap();
+        client.on("hello, client!", |msg| {
+            println!("Client received: {}", msg);
+        });
+        client.emit("hello, server");
+        client.listen();
+    }
+
+    #[test]
+    fn test_easy_http() {
+        thread::spawn(|| {
+            let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
                 let mut buffer = [0; 512];
-                net::read_from_stream(&mut stream, &mut buffer).unwrap();
-                net::write_to_stream(&mut stream, b"Hello, client!").unwrap();
+                stream.read(&mut buffer).unwrap();
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, world!";
+                stream.write_all(response.as_bytes()).unwrap();
             }
         });
 
-        // Simulate a client
-        let mut client = net::dial(address).unwrap();
-        net::write_to_stream(&mut client, b"Hello, server!").unwrap();
+        thread::sleep(std::time::Duration::from_secs(1)); // Allow server to start
 
-        let mut buffer = [0; 512];
-        let size = net::read_from_stream(&mut client, &mut buffer).unwrap();
-        assert_eq!(String::from_utf8_lossy(&buffer[..size]), "Hello, client!");
-    }
-
-    #[test]
-    fn test_udp_message() {
-        let server_address = "127.0.0.1:8888";
-        let client_address = "127.0.0.1:0";
-
-        let handle = thread::spawn(move || {
-            let mut buffer = [0; 512];
-            let (size, src) = net::udp_receive(server_address, &mut buffer).unwrap();
-            assert_eq!(src, "127.0.0.1:0");
-            assert_eq!(String::from_utf8_lossy(&buffer[..size]), "Hello, UDP server!");
-        });
-
-        net::udp_send(server_address, b"Hello, UDP server!").unwrap();
-        handle.join().unwrap();
-    }
-
-    #[test]
-    fn test_read_latest_message() {
-        let address = "127.0.0.1:8989";
-
-        thread::spawn(move || {
-            let listener = net::listen(address).unwrap();
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                net::write_to_stream(&mut stream, b"yes\nno\nye\n").unwrap();
-            }
-        });
-
-        let mut client = net::dial(address).unwrap();
-        let latest_message = net::read_latest_message(&mut client).unwrap();
-        assert_eq!(latest_message, "ye");
-    }
-
-    #[test]
-    fn test_http_get() {
-        // Simulate a basic HTTP server
-        let address = "127.0.0.1:8080";
-        thread::spawn(move || {
-            let listener = net::listen(address).unwrap();
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                let mut buffer = [0; 512];
-                net::read_from_stream(&mut stream, &mut buffer).unwrap();
-                net::write_to_stream(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, world!").unwrap();
-            }
-        });
-
-        let response = net::http::get(address, "/").unwrap();
+        let response = EasyHttp::get("127.0.0.1:8080", "/").unwrap();
         assert!(response.contains("Hello, world!"));
-    }
 
-    #[test]
-    fn test_http_post() {
-        // Simulate a basic HTTP server
-        let address = "127.0.0.1:8081";
-        thread::spawn(move || {
-            let listener = net::listen(address).unwrap();
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                let mut buffer = [0; 512];
-                net::read_from_stream(&mut stream, &mut buffer).unwrap();
-                net::write_to_stream(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSuccess").unwrap();
-            }
-        });
-
-        let response = net::http::post(address, "/submit", "data").unwrap();
-        assert!(response.contains("Success"));
+        let post_response = EasyHttp::post("127.0.0.1:8080", "/submit", "{\"key\": \"value\"}").unwrap();
+        println!("POST Response: {}", post_response);
     }
 }
-

@@ -1,18 +1,26 @@
+
 # networker-rs
 
-`networker-rs` is a Rust library that provides networking utilities for TCP, UDP, and HTTP functionalities inspired by Go's `net` package. It simplifies common networking tasks such as dialing connections, listening for incoming connections, and sending/receiving HTTP requests.
+`networker-rs` is a Rust library that provides networking utilities for TCP, UDP, WebSocket, and HTTP functionalities, inspired by Go's `net` package and JavaScript's `socket.io`. It simplifies common networking tasks and enables event-driven networking with an easy-to-use API.
+
+Latest update: Made the tcp calls with socket.emit and more easier calls, added ws with the same result.
 
 ## Features
 
 - **TCP Support**
   - Dial connections to a specified address.
   - Listen for incoming connections.
-  - Read and write to TCP streams.
-  - Utility to read the latest message from a stream until the last newline.
+  - Emit events and handle specific message events.
+  - Utility to read and write to TCP streams.
 
 - **UDP Support**
   - Send messages to a specified address.
   - Receive messages on a specified address.
+
+- **WebSocket Support**
+  - Connect to WebSocket servers.
+  - Start a WebSocket server and handle bidirectional communication.
+  - Emit and listen for events/messages.
 
 - **HTTP Support**
   - Simple HTTP GET and POST request functionality.
@@ -23,7 +31,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-networker-rs = "0.1.0" # Replace with the latest version
+networker-rs = "0.2.0" # Replace with the latest version
 ```
 
 ## Example Usage
@@ -31,25 +39,26 @@ networker-rs = "0.1.0" # Replace with the latest version
 ### TCP Example
 
 ```rust
-use networker_rs::net;
+use networker_rs::net::EasySocket;
 
 fn main() {
-    let address = "127.0.0.1:7878";
+    let mut socket = EasySocket::tcp("127.0.0.1:7878").unwrap();
 
-    // Start a TCP server in a separate thread
-    std::thread::spawn(move || {
-        let listener = net::listen(address).unwrap();
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            net::write_to_stream(&mut stream, b"Hello, client!").unwrap();
-        }
+    // Emit a message to the server
+    socket.emit("hello, server");
+
+    // Listen for generic messages
+    socket.onmessage(|msg| {
+        println!("Received message: {}", msg);
     });
 
-    // Connect to the server as a client
-    let mut client = net::dial(address).unwrap();
-    let mut buffer = [0; 512];
-    let size = net::read_from_stream(&mut client, &mut buffer).unwrap();
-    println!("Received: {}", String::from_utf8_lossy(&buffer[..size]));
+    // Listen for a specific event
+    socket.on("hello, client!", |msg| {
+        println!("Received specific event: {}", msg);
+    });
+
+    // Start listening for messages
+    socket.listen();
 }
 ```
 
@@ -73,34 +82,45 @@ fn main() {
 }
 ```
 
+### WebSocket Example
+
+```rust
+use networker_rs::net::EasySocket;
+
+fn main() {
+    let mut socket = EasySocket::ws("ws://127.0.0.1:9001").unwrap();
+
+    // Emit a message to the WebSocket server
+    socket.emit("hello, WebSocket server");
+
+    // Listen for WebSocket messages
+    socket.onmessage(|msg| {
+        println!("Received WebSocket message: {}", msg);
+    });
+
+    // Start listening for messages
+    socket.listen();
+}
+```
+
 ### HTTP Example
 
 ```rust
-use networker_rs::net::http;
+use networker_rs::net::http::EasyHttp;
 
 fn main() {
     let address = "127.0.0.1:8080";
 
-    // Simulate a basic HTTP server in a separate thread
-    std::thread::spawn(move || {
-        let listener = networker_rs::net::listen(address).unwrap();
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            networker_rs::net::write_to_stream(&mut stream, b"HTTP/1.1 200 OK
-
-Content-Length: 13
-
-
-
-Hello, world!").unwrap();
-        }
-    });
-
     // Perform an HTTP GET request
-    let response = http::get(address, "/").unwrap();
-    println!("Response: {}", response);
+    let response = EasyHttp::get(address, "/").unwrap();
+    println!("GET Response: {}", response);
+
+    // Perform an HTTP POST request
+    let post_response = EasyHttp::post(address, "/submit", "{"key": "value"}").unwrap();
+    println!("POST Response: {}", post_response);
 }
 ```
 
 ## License
 
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
