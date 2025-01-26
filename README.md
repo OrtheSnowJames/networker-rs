@@ -3,7 +3,7 @@
 
 `networker-rs` is a Rust library that provides networking utilities for TCP, UDP, WebSocket, and HTTP functionalities, inspired by Go's `net` package and JavaScript's `socket.io`. It simplifies common networking tasks and enables event-driven networking with an easy-to-use API.
 
-Latest update: Made client/server communication instead of p2p communication
+Latest update: Made client/server communication instead of p2p communication && revised documentation
 
 ## Features
 
@@ -39,88 +39,66 @@ networker-rs = "0.2.0" # Replace with the latest version
 ### TCP Example
 
 ```rust
-use networker_rs::net::EasySocket;
+use networker_rs::net::EasySocketServer;
 
 fn main() {
-    let mut socket = EasySocket::tcp("127.0.0.1:7878").unwrap();
-
-    // Emit a message to the server
-    socket.emit("hello, server");
-
-    // Listen for generic messages
-    socket.onmessage(|msg| {
-        println!("Received message: {}", msg);
+    let server = EasySocketServer::new();
+    server.on("connection", |socket| {
+        socket.on("hello, server", |msg| {
+            println!("Server received: {}", msg);
+        });
+        socket.emit("hello, client!");
+        socket.listen_tcp();
     });
-
-    // Listen for a specific event
-    socket.on("hello, client!", |msg| {
-        println!("Received specific event: {}", msg);
-    });
-
-    // Start listening for messages
-    socket.listen();
+    server.listen_tcp("127.0.0.1:7878").unwrap();
 }
 ```
 
 ### UDP Example
 
 ```rust
-use networker_rs::net;
+use networker_rs::net::EasySocketServer;
 
 fn main() {
-    let server_address = "127.0.0.1:8888";
-
-    // Start a UDP listener in a separate thread
-    std::thread::spawn(move || {
-        let mut buffer = [0; 512];
-        let (size, src) = net::udp_receive(server_address, &mut buffer).unwrap();
-        println!("Received '{}' from {}", String::from_utf8_lossy(&buffer[..size]), src);
+    let server = EasySocketServer::new();
+    server.on("connection", |socket| {
+        socket.on("hello, server", |msg| {
+            println!("Server received: {}", msg);
+        });
     });
-
-    // Send a UDP message
-    net::udp_send(server_address, b"Hello, UDP server!").unwrap();
+    server.listen_udp("127.0.0.1:8888").unwrap();
 }
 ```
 
 ### WebSocket Example
 
 ```rust
-use networker_rs::net::EasySocket;
+use networker_rs::net::EasySocketServer;
 
 fn main() {
-    let mut socket = EasySocket::ws("ws://127.0.0.1:9001").unwrap();
-
-    // Emit a message to the WebSocket server
-    socket.emit("hello, WebSocket server");
-
-    // Listen for WebSocket messages
-    socket.onmessage(|msg| {
-        println!("Received WebSocket message: {}", msg);
+    let server = EasySocketServer::new();
+    server.on("connection", |socket| {
+        socket.on("hello, WebSocket server", |msg| {
+            println!("Server received: {}", msg);
+        });
     });
-
-    // Start listening for messages
-    socket.listen();
+    server.listen_ws("127.0.0.1:9001").unwrap();
 }
 ```
 
 ### HTTP Example
 
 ```rust
-use networker_rs::net::http::EasyHttp;
+use networker_rs::net::EasySocketServer;
 
-fn main() {
-    let address = "127.0.0.1:8080";
-
-    // Perform an HTTP GET request
-    let response = EasyHttp::get(address, "/").unwrap();
-    println!("GET Response: {}", response);
-
-    // Perform an HTTP POST request
-    let post_response = EasyHttp::post(address, "/submit", "{"key": "value"}").unwrap();
-    println!("POST Response: {}", post_response);
+#[tokio::main]
+async fn main() {
+    let server = EasySocketServer::new();
+    server.listen_http("127.0.0.1:8080").await.unwrap();
 }
 ```
 
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
