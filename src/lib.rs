@@ -1,129 +1,137 @@
-use std::io::{self, BufRead, Read, Write, BufReader};
-use std::net::{TcpListener, TcpStream, UdpSocket, ToSocketAddrs};
 use std::collections::HashMap;
+use std::io::{self, BufRead, Read, Write};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
-use tungstenite::{accept, connect, Message};
-use tungstenite::protocol::WebSocket;
-use url::Url;
+use tungstenite::{accept, Message};
+use hyper::{body::Body, Request, Response, Server, service::{make_service_fn, service_fn}};
 
 pub mod net {
     use super::*;
 
-    pub struct EasySocket {
-        tcp_stream: Option<TcpStream>,
-        udp_socket: Option<UdpSocket>,
-        ws_stream: Option<WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>>,
+    pub struct EasySocketServer {
+        handlers: Arc<Mutex<HashMap<String, Arc<dyn Fn(Socket) + Send + Sync + 'static>>>>,
+    }
+
+    #[derive(Clone)]
+    pub struct Socket {
+        stream: Option<Arc<Mutex<TcpStream>>>,
+        udp_socket: Option<Arc<UdpSocket>>,
         handlers: Arc<Mutex<HashMap<String, Box<dyn Fn(&str) + Send>>>>,
     }
 
-    impl EasySocket {
-        pub fn tcp(address: &str) -> io::Result<Self> {
-            let tcp_stream = TcpStream::connect(address)?;
-            Ok(Self {
-                tcp_stream: Some(tcp_stream),
-                udp_socket: None,
-                ws_stream: None,
+    impl EasySocketServer {
+        pub fn new() -> Self {
+            Self {
                 handlers: Arc::new(Mutex::new(HashMap::new())),
-            })
-        }
-
-        pub fn udp(address: &str) -> io::Result<Self> {
-            let udp_socket = UdpSocket::bind(address)?;
-            Ok(Self {
-                tcp_stream: None,
-                udp_socket: Some(udp_socket),
-                ws_stream: None,
-                handlers: Arc::new(Mutex::new(HashMap::new())),
-            })
-        }
-
-        pub fn ws(url: &str) -> tungstenite::Result<Self> {
-            let (ws_stream, _) = connect(url)?;
-            Ok(Self {
-                tcp_stream: None,
-                udp_socket: None,
-                ws_stream: Some(ws_stream),
-                handlers: Arc::new(Mutex::new(HashMap::new())),
-            })
-        }
-
-        pub fn emit(&mut self, event: &str) {
-            if let Some(ref mut tcp) = self.tcp_stream {
-                tcp.write_all(event.as_bytes()).unwrap();
-            } else if let Some(ref mut ws) = self.ws_stream {
-                ws.write_message(Message::Text(event.into())).unwrap();
             }
         }
 
-        pub fn on<F>(&mut self, event: &str, callback: F)
+        pub fn on<F>(&self, event: &str, callback: F)
+        where
+            F: Fn(Socket) + Send + Sync + 'static,
+        {
+            self.handlers.lock().unwrap().insert(event.to_string(), Arc::new(callback));
+        }
+
+        pub fn listen_tcp(&self, address: &str) -> io::Result<()> {
+            let listener = TcpListener::bind(address)?;
+            for stream in listener.incoming() {
+                let stream = stream?;
+                let socket = Socket::new_tcp(stream);
+                let handlers = Arc::clone(&self.handlers);
+                let callback = handlers.lock().unwrap().get("connection").cloned();
+                if let Some(callback) = callback {
+                    callback(socket);
+                }
+            }
+            Ok(())
+        }
+
+        pub fn listen_udp(&self, address: &str) -> io::Result<()> {
+            let socket = UdpSocket::bind(address)?;
+            let udp_socket = Arc::new(socket);
+            let mut buffer = [0; 1024];
+            loop {
+                if let Ok((size, src)) = udp_socket.recv_from(&mut buffer) {
+                    let message = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    let handlers = Arc::clone(&self.handlers);
+                    if let Some(callback) = handlers.lock().unwrap().get("connection") {
+                        callback(Socket::new_udp(udp_socket.clone()));
+                    }
+                    println!("Received from {}: {}", src, message);
+                }
+            }
+        }
+
+        pub async fn listen_http(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
+            let make_svc = make_service_fn(|_conn| async {
+                Ok::<_, hyper::Error>(service_fn(|_req: Request<Body>| async {
+                    Ok::<_, hyper::Error>(Response::new(Body::from("Hello, HTTP!")))
+                }))
+            });
+        
+            let addr = address.parse()?; // Parse the address
+            let server = Server::bind(&addr).serve(make_svc); // Use `try_bind` to bind to the address        
+            println!("Listening on http://{}", address);
+            server.await?;
+            Ok(())
+        }
+        
+        pub fn listen_ws(&self, address: &str) -> io::Result<()> {
+            let listener = TcpListener::bind(address)?;
+            for stream in listener.incoming() {
+                let stream = stream?;
+                let mut websocket = accept(stream).expect("Error during WebSocket handshake");
+                if let Ok(Message::Text(msg)) = websocket.read_message() {
+                    println!("WebSocket received: {}", msg);
+                    websocket.write_message(Message::Text("Hello, WebSocket!".into())).unwrap();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Socket {
+        pub fn new_tcp(stream: TcpStream) -> Self {
+            Self {
+                stream: Some(Arc::new(Mutex::new(stream))),
+                udp_socket: None,
+                handlers: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        pub fn new_udp(socket: Arc<UdpSocket>) -> Self {
+            Self {
+                stream: None,
+                udp_socket: Some(socket),
+                handlers: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        pub fn on<F>(&self, event: &str, callback: F)
         where
             F: Fn(&str) + Send + 'static,
         {
             self.handlers.lock().unwrap().insert(event.to_string(), Box::new(callback));
         }
 
-        pub fn onmessage<F>(&mut self, callback: F)
-        where
-            F: Fn(&str) + Send + 'static,
-        {
-            self.on("message", callback);
+        pub fn emit(&self, event: &str) {
+            if let Some(stream) = &self.stream {
+                let mut stream = stream.lock().unwrap();
+                let _ = stream.write_all(event.as_bytes());
+            }
         }
 
-        pub fn listen(&mut self) {
-            if let Some(ref mut tcp) = self.tcp_stream {
-                let mut buffer = [0; 1024];
-                let size = tcp.read(&mut buffer).unwrap();
-                let message = String::from_utf8_lossy(&buffer[..size]).to_string();
-                if let Some(callback) = self.handlers.lock().unwrap().get("message") {
-                    callback(&message);
-                }
-                if let Some(callback) = self.handlers.lock().unwrap().get(&message) {
-                    callback(&message);
-                }
-            } else if let Some(ref mut ws) = self.ws_stream {
-                if let Ok(msg) = ws.read_message() {
-                    if let Message::Text(text) = msg {
-                        if let Some(callback) = self.handlers.lock().unwrap().get("message") {
-                            callback(&text);
-                        }
-                        if let Some(callback) = self.handlers.lock().unwrap().get(text.as_str()) {
-                            callback(&text);
-                        }
+        pub fn listen_tcp(&self) {
+            let mut buffer = [0; 1024];
+            if let Some(stream) = &self.stream {
+                let mut stream = stream.lock().unwrap();
+                if let Ok(size) = stream.read(&mut buffer) {
+                    let message = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    if let Some(callback) = self.handlers.lock().unwrap().get(&message) {
+                        callback(&message);
                     }
                 }
-            }
-        }
-    }
-
-    pub mod http {
-        use super::*;
-
-        pub struct EasyHttp;
-
-        impl EasyHttp {
-            pub fn get(address: &str, path: &str) -> io::Result<String> {
-                let mut stream = TcpStream::connect(address)?;
-                let request = format!("GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", path);
-                stream.write_all(request.as_bytes())?;
-
-                let mut response = String::new();
-                stream.read_to_string(&mut response)?;
-                Ok(response)
-            }
-
-            pub fn post(address: &str, path: &str, body: &str) -> io::Result<String> {
-                let mut stream = TcpStream::connect(address)?;
-                let request = format!(
-                    "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
-                    path,
-                    body.len(),
-                    body
-                );
-                stream.write_all(request.as_bytes())?;
-
-                let mut response = String::new();
-                stream.read_to_string(&mut response)?;
-                Ok(response)
             }
         }
     }
@@ -131,52 +139,31 @@ pub mod net {
 
 #[cfg(test)]
 mod tests {
-    use super::net::{EasySocket, http::EasyHttp};
+    use super::net::{self, EasySocketServer};
     use std::thread;
-    use std::net::TcpListener;
-    use std::io::Read;
 
     #[test]
-    fn test_easy_socket() {
+    fn test_tcp_server_client() {
         thread::spawn(|| {
-            let mut server = EasySocket::tcp("127.0.0.1:5767").unwrap();
-            server.on("hello, server", |msg| {
-                println!("Server received: {}", msg);
+            let server = EasySocketServer::new();
+            server.on("connection", |socket| {
+                socket.on("hello, server", |msg| {
+                    println!("Server received: {}", msg);
+                });
+                socket.emit("hello, client!");
+                socket.listen_tcp();
             });
-            server.emit("hello, client!");
-            server.listen();
+            server.listen_tcp("127.0.0.1:4000").unwrap();
         });
 
         thread::sleep(std::time::Duration::from_secs(1)); // Allow server to start
 
-        let mut client = EasySocket::tcp("127.0.0.1:5767").unwrap();
-        client.on("hello, client!", |msg| {
+        let client = std::net::TcpStream::connect("127.0.0.1:4000").unwrap();
+        let socket = net::Socket::new_tcp(client);
+        socket.on("hello, client!", |msg| {
             println!("Client received: {}", msg);
         });
-        client.emit("hello, server");
-        client.listen();
-    }
-
-    #[test]
-    fn test_easy_http() {
-        use std::io::Write;
-        thread::spawn(|| {
-            let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
-            for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
-                let mut buffer = [0; 512];
-                stream.read(&mut buffer).unwrap();
-                let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, world!";
-                stream.write_all(response.as_bytes()).unwrap();
-            }
-        });
-
-        thread::sleep(std::time::Duration::from_secs(1)); // Allow server to start
-
-        let response = EasyHttp::get("127.0.0.1:8080", "/").unwrap();
-        assert!(response.contains("Hello, world!"));
-
-        let post_response = EasyHttp::post("127.0.0.1:8080", "/submit", "{\"key\": \"value\"}").unwrap();
-        println!("POST Response: {}", post_response);
+        socket.emit("hello, server");
+        socket.listen_tcp();
     }
 }

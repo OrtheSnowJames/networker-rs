@@ -1,6 +1,6 @@
 [package]
 name = "networker-rs"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["James Yacoube <jamesyacoube@yahoo.com>"]
 edition = "2021"
 description = "A Rust library providing TCP, UDP, and HTTP easier calls."
@@ -12,5 +12,6 @@ categories = ["network-programming", "web-programming"]
 readme = "README.md"
 
 [dependencies]
-tungstenite = "0.26.1"
+hyper = { version = "0.14", features = ["server", "full"] }
+tungstenite = "0.17"
 url = "2.5.4"
