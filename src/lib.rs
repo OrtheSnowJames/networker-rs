@@ -137,22 +137,29 @@ pub mod net {
         pub fn emit(&self, event: &str) {
             if let Some(stream) = &self.stream {
                 let mut stream = stream.lock().unwrap();
-                let _ = stream.write_all(event.as_bytes());
+                let message = format!("{}:\n", event); // Append newline
+                let _ = stream.write_all(message.as_bytes());
             }
         }
+        
 
         pub fn listen_tcp(&self) {
             let mut buffer = [0; 1024];
             if let Some(stream) = &self.stream {
                 let mut stream = stream.lock().unwrap();
                 if let Ok(size) = stream.read(&mut buffer) {
-                    let message = String::from_utf8_lossy(&buffer[..size]).to_string();
-                    if let Some(callback) = self.handlers.lock().unwrap().get(&message) {
-                        callback(&message);
+                    let data = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    for line in data.lines() { // Split by newline
+                        if let Some((event, _)) = line.split_once(':') {
+                            if let Some(callback) = self.handlers.lock().unwrap().get(event) {
+                                callback(""); // Call handler (pass empty string as data)
+                            }
+                        }
                     }
                 }
             }
         }
+        
     }
 
     #[cfg(test)]

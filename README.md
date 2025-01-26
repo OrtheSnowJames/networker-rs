@@ -3,7 +3,7 @@
 
 `networker-rs` is a Rust library that provides networking utilities for TCP, UDP, WebSocket, and HTTP functionalities, inspired by Go's `net` package and JavaScript's `socket.io`. It simplifies common networking tasks and enables event-driven networking with an easy-to-use API.
 
-Latest update: Added socket ids
+Latest update: Made newline delimiters
 
 ## Features
 
