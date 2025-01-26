@@ -1,6 +1,6 @@
 [package]
 name = "networker-rs"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["James Yacoube <jamesyacoube@yahoo.com>"]
 edition = "2021"
 description = "A Rust library providing TCP, UDP, and HTTP easier calls."

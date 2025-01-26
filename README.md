@@ -3,7 +3,7 @@
 
 `networker-rs` is a Rust library that provides networking utilities for TCP, UDP, WebSocket, and HTTP functionalities, inspired by Go's `net` package and JavaScript's `socket.io`. It simplifies common networking tasks and enables event-driven networking with an easy-to-use API.
 
-Latest update: Made client/server communication instead of p2p communication && revised documentation
+Latest update: Added socket ids
 
 ## Features
 
@@ -95,6 +95,20 @@ use networker_rs::net::EasySocketServer;
 async fn main() {
     let server = EasySocketServer::new();
     server.listen_http("127.0.0.1:8080").await.unwrap();
+}
+```
+
+You can also get socket ids by doing either
+```rust
+// client side
+fn client() {
+    // ... bootstrapping code ...
+    let sockID = client.id()
+}
+// server side
+fn server() {
+    // ... code up until sever.on
+            let clientID = socket.id()
 }
 ```
 

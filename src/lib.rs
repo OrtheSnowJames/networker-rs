@@ -4,6 +4,8 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use tungstenite::{accept, Message};
 use hyper::{body::Body, Request, Response, Server, service::{make_service_fn, service_fn}};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 pub mod net {
     use super::*;
@@ -14,6 +16,7 @@ pub mod net {
 
     #[derive(Clone)]
     pub struct Socket {
+        id: i32,
         stream: Option<Arc<Mutex<TcpStream>>>,
         udp_socket: Option<Arc<UdpSocket>>,
         handlers: Arc<Mutex<HashMap<String, Box<dyn Fn(&str) + Send>>>>,
@@ -92,8 +95,17 @@ pub mod net {
     }
 
     impl Socket {
+        fn generate_stable_id(addr: &str) -> i32 {
+            let mut hasher = DefaultHasher::new();
+            addr.hash(&mut hasher);
+            (hasher.finish() & 0x7FFFFFFF) as i32 // Ensure positive i32
+        }
+
         pub fn new_tcp(stream: TcpStream) -> Self {
+            let addr = format!("{:?}", stream.peer_addr().unwrap_or_else(|_| panic!("Could not get peer address")));
+            let id = Self::generate_stable_id(&addr);
             Self {
+                id,
                 stream: Some(Arc::new(Mutex::new(stream))),
                 udp_socket: None,
                 handlers: Arc::new(Mutex::new(HashMap::new())),
@@ -101,11 +113,18 @@ pub mod net {
         }
 
         pub fn new_udp(socket: Arc<UdpSocket>) -> Self {
+            let addr = format!("{:?}", socket.local_addr().unwrap_or_else(|_| panic!("Could not get local address")));
+            let id = Self::generate_stable_id(&addr);
             Self {
+                id,
                 stream: None,
                 udp_socket: Some(socket),
                 handlers: Arc::new(Mutex::new(HashMap::new())),
             }
+        }
+
+        pub fn id(&self) -> i32 {
+            self.id
         }
 
         pub fn on<F>(&self, event: &str, callback: F)
@@ -133,6 +152,19 @@ pub mod net {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_stable_socket_ids() {
+            let addr = "127.0.0.1:8080";
+            let id1 = Socket::generate_stable_id(addr);
+            let id2 = Socket::generate_stable_id(addr);
+            assert_eq!(id1, id2, "Same address should generate same ID");
         }
     }
 }
