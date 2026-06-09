@@ -89,6 +89,7 @@ pub mod net {
     pub struct EasySocketServer {
         handlers: Arc<Mutex<HashMap<String, Arc<dyn Fn(Socket) + Send + Sync + 'static>>>>,
         udp_reliable_history: Arc<Mutex<HashMap<SocketAddr, VecDeque<u64>>>>,
+        udp_connections: Arc<Mutex<HashMap<SocketAddr, Socket>>>,
     }
 
     #[derive(Clone)]
@@ -106,6 +107,7 @@ pub mod net {
             Self {
                 handlers: Arc::new(Mutex::new(HashMap::new())),
                 udp_reliable_history: Arc::new(Mutex::new(HashMap::new())),
+                udp_connections: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
@@ -149,20 +151,50 @@ pub mod net {
                             println!("Ignored duplicate reliable UDP packet: {}", ack_id);
                             continue;
                         }
-                        let socket = Socket::new_udp_with_peer(udp_socket.clone(), src);
-                        if let Some(callback) = self.handlers.lock().unwrap().get("connection").cloned() {
-                            callback(socket.clone());
-                        }
+                        let socket = {
+                            let mut connections = self.udp_connections.lock().unwrap();
+                            connections
+                                .entry(src)
+                                .or_insert_with(|| {
+                                    let socket = Socket::new_udp_with_peer(udp_socket.clone(), src);
+                                    if let Some(callback) = self
+                                        .handlers
+                                        .lock()
+                                        .unwrap()
+                                        .get("connection")
+                                        .cloned()
+                                    {
+                                        callback(socket.clone());
+                                    }
+                                    socket
+                                })
+                                .clone()
+                        };
                         dispatch_udp_event(&socket, event, payload);
                     } else {
                         let (event, payload) = match message.split_once(':') {
                             Some((event, payload)) => (event, payload),
                             None => (message.as_str(), ""),
                         };
-                        let socket = Socket::new_udp_with_peer(udp_socket.clone(), src);
-                        if let Some(callback) = self.handlers.lock().unwrap().get("connection").cloned() {
-                            callback(socket.clone());
-                        }
+                        let socket = {
+                            let mut connections = self.udp_connections.lock().unwrap();
+                            connections
+                                .entry(src)
+                                .or_insert_with(|| {
+                                    let socket = Socket::new_udp_with_peer(udp_socket.clone(), src);
+                                    if let Some(callback) = self
+                                        .handlers
+                                        .lock()
+                                        .unwrap()
+                                        .get("connection")
+                                        .cloned()
+                                    {
+                                        callback(socket.clone());
+                                    }
+                                    socket
+                                })
+                                .clone()
+                        };
                         dispatch_udp_event(&socket, event, payload);
                     }
                     println!("Received: {}", message);
@@ -190,6 +222,7 @@ pub mod net {
                 let _ = self.listen_tcp(&address);
             });
         }
+
     }
 
     impl Socket {
@@ -215,7 +248,7 @@ pub mod net {
             }
         }
 
-        fn new_udp_with_peer(socket: Arc<UdpSocket>, peer: SocketAddr) -> Self {
+        pub fn new_udp_with_peer(socket: Arc<UdpSocket>, peer: SocketAddr) -> Self {
             Self {
                 id: 0,
                 stream: None,
@@ -224,6 +257,15 @@ pub mod net {
                 ws_stream: None,
                 handlers: Arc::new(Mutex::new(HashMap::new())),
             }
+        }
+
+        pub fn udp(address: &str) -> io::Result<Self> {
+            let peer: SocketAddr = address.parse().map_err(|error| {
+                io::Error::new(io::ErrorKind::InvalidInput, format!("{error}"))
+            })?;
+            let socket = UdpSocket::bind("0.0.0.0:0")?;
+            socket.connect(peer)?;
+            Ok(Self::new_udp_with_peer(Arc::new(socket), peer))
         }
 
         fn new_ws_server(websocket: WebSocket<TcpStream>) -> Self {
@@ -251,6 +293,10 @@ pub mod net {
 
         pub fn id(&self) -> i32 {
             self.id
+        }
+
+        pub fn peer_addr(&self) -> Option<SocketAddr> {
+            self.udp_peer
         }
 
         pub fn on<F>(&self, event: &str, callback: F)
@@ -408,6 +454,56 @@ pub mod net {
             }
         }
 
+        pub fn listen_udp(&self) {
+            if let Some(udp_socket) = &self.udp_socket {
+                let cloned = udp_socket.try_clone();
+                let Ok(socket) = cloned else {
+                    return;
+                };
+                let mut buffer = [0; 1024];
+                loop {
+                    let Ok((size, src)) = socket.recv_from(&mut buffer) else {
+                        break;
+                    };
+                    if let Some(peer) = self.udp_peer {
+                        if src != peer {
+                            continue;
+                        }
+                    }
+
+                    let message = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    if let Some(ack_id) = parse_udp_ack(&message) {
+                        let ack_message = format!("{UDP_ACK_PREFIX}:{ack_id}");
+                        let _ = socket.send_to(ack_message.as_bytes(), src);
+                        continue;
+                    }
+
+                    if let Some((ack_id, event, payload)) = parse_udp_reliable(&message) {
+                        let ack_message = format!("{UDP_ACK_PREFIX}:{ack_id}");
+                        let _ = socket.send_to(ack_message.as_bytes(), src);
+                        if let Some(callback) = self.handlers.lock().unwrap().get(event) {
+                            let payload_bytes = general_purpose::STANDARD
+                                .decode(payload)
+                                .unwrap_or_else(|_| payload.as_bytes().to_vec());
+                            callback(&payload_bytes);
+                        }
+                        continue;
+                    }
+
+                    let (event, payload) = match message.split_once(':') {
+                        Some((event, payload)) => (event, payload),
+                        None => (message.as_str(), ""),
+                    };
+
+                    if let Some(callback) = self.handlers.lock().unwrap().get(event) {
+                        let payload_bytes = general_purpose::STANDARD
+                            .decode(payload)
+                            .unwrap_or_else(|_| payload.as_bytes().to_vec());
+                        callback(&payload_bytes);
+                    }
+                }
+            }
+        }
         pub fn listen_ws(&self) {
             if let Some(websocket) = &self.ws_stream {
                 loop {
