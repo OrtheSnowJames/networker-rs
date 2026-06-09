@@ -1,9 +1,9 @@
 
 # networker-rs
 
-`networker-rs` is a Rust library that provides networking utilities for TCP, UDP, WebSocket, and HTTP functionalities, inspired by Go's `net` package and JavaScript's `socket.io`. It simplifies common networking tasks and enables event-driven networking with an easy-to-use API.
+`networker-rs` is a Rust library that provides networking utilities for TCP, UDP, and WebSocket functionality, inspired by Go's `net` package and JavaScript's `socket.io`. It simplifies common networking tasks and enables event-driven networking with an easy-to-use API.
 
-Latest update: Made newline delimiters
+Latest update: Restored websocket support and UDP reliability retries
 
 ## Features
 
@@ -15,15 +15,13 @@ Latest update: Made newline delimiters
 
 - **UDP Support**
   - Send messages to a specified address.
+  - Optionally retry sends until the receiver acknowledges them.
   - Receive messages on a specified address.
 
 - **WebSocket Support**
   - Connect to WebSocket servers.
   - Start a WebSocket server and handle bidirectional communication.
   - Emit and listen for events/messages.
-
-- **HTTP Support**
-  - Simple HTTP GET and POST request functionality.
 
 ## Installation
 
@@ -65,6 +63,8 @@ fn main() {
         socket.on("hello, server", |msg| {
             println!("Server received: {}", msg);
         });
+        // retries delivery until acknowledged
+        socket.send_with_reliability("hello, client", b"world", true); 
     });
     server.listen_udp("127.0.0.1:8888").unwrap();
 }
@@ -86,15 +86,14 @@ fn main() {
 }
 ```
 
-### HTTP Example
+### WebSocket Client Example
 
 ```rust
-use networker_rs::net::EasySocketServer;
+use networker_rs::net::Socket;
 
-#[tokio::main]
-async fn main() {
-    let server = EasySocketServer::new();
-    server.listen_http("127.0.0.1:8080").await.unwrap();
+fn main() {
+    let socket = Socket::ws("ws://127.0.0.1:9001").unwrap();
+    socket.send("hello", b"world");
 }
 ```
 
@@ -115,4 +114,3 @@ fn server() {
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
