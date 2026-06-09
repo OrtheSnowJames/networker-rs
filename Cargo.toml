@@ -12,6 +12,8 @@ categories = ["network-programming", "web-programming"]
 readme = "README.md"
 
 [dependencies]
+base64 = "0.22.1"
 hyper = { version = "0.14", features = ["server", "full"] }
+tokio = "1.43.0"
 tungstenite = "0.17"
 url = "2.5.4"

@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: MIT
+use base64::{engine::general_purpose, Engine as _};
 use std::collections::HashMap;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
-use tungstenite::{accept, Message};
-use hyper::{body::Body, Request, Response, Server, service::{make_service_fn, service_fn}};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::thread;
 
 pub mod net {
     use super::*;
@@ -19,7 +18,7 @@ pub mod net {
         id: i32,
         stream: Option<Arc<Mutex<TcpStream>>>,
         udp_socket: Option<Arc<UdpSocket>>,
-        handlers: Arc<Mutex<HashMap<String, Box<dyn Fn(&str) + Send>>>>,
+        handlers: Arc<Mutex<HashMap<String, Box<dyn Fn(&[u8]) + Send>>>>,
     }
 
     impl EasySocketServer {
@@ -55,57 +54,28 @@ pub mod net {
             let udp_socket = Arc::new(socket);
             let mut buffer = [0; 1024];
             loop {
-                if let Ok((size, src)) = udp_socket.recv_from(&mut buffer) {
+                if let Ok((size, _src)) = udp_socket.recv_from(&mut buffer) {
                     let message = String::from_utf8_lossy(&buffer[..size]).to_string();
                     let handlers = Arc::clone(&self.handlers);
                     if let Some(callback) = handlers.lock().unwrap().get("connection") {
                         callback(Socket::new_udp(udp_socket.clone()));
                     }
-                    println!("Received from {}: {}", src, message);
+                    println!("Received: {}", message);
                 }
             }
         }
 
-        pub async fn listen_http(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
-            let make_svc = make_service_fn(|_conn| async {
-                Ok::<_, hyper::Error>(service_fn(|_req: Request<Body>| async {
-                    Ok::<_, hyper::Error>(Response::new(Body::from("Hello, HTTP!")))
-                }))
+        pub fn listen_tcp_background(self: Arc<Self>, address: String) {
+            thread::spawn(move || {
+                let _ = self.listen_tcp(&address);
             });
-        
-            let addr = address.parse()?; // Parse the address
-            let server = Server::bind(&addr).serve(make_svc); // Use `try_bind` to bind to the address        
-            println!("Listening on http://{}", address);
-            server.await?;
-            Ok(())
-        }
-        
-        pub fn listen_ws(&self, address: &str) -> io::Result<()> {
-            let listener = TcpListener::bind(address)?;
-            for stream in listener.incoming() {
-                let stream = stream?;
-                let mut websocket = accept(stream).expect("Error during WebSocket handshake");
-                if let Ok(Message::Text(msg)) = websocket.read_message() {
-                    println!("WebSocket received: {}", msg);
-                    websocket.write_message(Message::Text("Hello, WebSocket!".into())).unwrap();
-                }
-            }
-            Ok(())
         }
     }
 
     impl Socket {
-        fn generate_stable_id(addr: &str) -> i32 {
-            let mut hasher = DefaultHasher::new();
-            addr.hash(&mut hasher);
-            (hasher.finish() & 0x7FFFFFFF) as i32 // Ensure positive i32
-        }
-
         pub fn new_tcp(stream: TcpStream) -> Self {
-            let addr = format!("{:?}", stream.peer_addr().unwrap_or_else(|_| panic!("Could not get peer address")));
-            let id = Self::generate_stable_id(&addr);
             Self {
-                id,
+                id: 0,
                 stream: Some(Arc::new(Mutex::new(stream))),
                 udp_socket: None,
                 handlers: Arc::new(Mutex::new(HashMap::new())),
@@ -113,10 +83,8 @@ pub mod net {
         }
 
         pub fn new_udp(socket: Arc<UdpSocket>) -> Self {
-            let addr = format!("{:?}", socket.local_addr().unwrap_or_else(|_| panic!("Could not get local address")));
-            let id = Self::generate_stable_id(&addr);
             Self {
-                id,
+                id: 0,
                 stream: None,
                 udp_socket: Some(socket),
                 handlers: Arc::new(Mutex::new(HashMap::new())),
@@ -131,35 +99,70 @@ pub mod net {
         where
             F: Fn(&str) + Send + 'static,
         {
+            self.on_bytes(event, move |payload| {
+                let payload = String::from_utf8_lossy(payload);
+                callback(payload.as_ref());
+            });
+        }
+
+        pub fn on_bytes<F>(&self, event: &str, callback: F)
+        where
+            F: Fn(&[u8]) + Send + 'static,
+        {
             self.handlers.lock().unwrap().insert(event.to_string(), Box::new(callback));
         }
 
         pub fn emit(&self, event: &str) {
+            self.send(event, []);
+        }
+
+        pub fn emit_with(&self, event: &str, payload: &str) {
+            self.send(event, payload.as_bytes());
+        }
+
+        pub fn send(&self, event: &str, payload: impl AsRef<[u8]>) {
             if let Some(stream) = &self.stream {
                 let mut stream = stream.lock().unwrap();
-                let message = format!("{}:\n", event); // Append newline
-                let _ = stream.write_all(message.as_bytes());
+                let encoded = general_purpose::STANDARD.encode(payload.as_ref());
+                let _ = stream.write_all(format!("{event}:{encoded}").as_bytes());
+                let _ = stream.write_all(b"\n");
+                let _ = stream.flush();
             }
         }
-        
 
         pub fn listen_tcp(&self) {
-            let mut buffer = [0; 1024];
             if let Some(stream) = &self.stream {
-                let mut stream = stream.lock().unwrap();
-                if let Ok(size) = stream.read(&mut buffer) {
-                    let data = String::from_utf8_lossy(&buffer[..size]).to_string();
-                    for line in data.lines() { // Split by newline
-                        if let Some((event, _)) = line.split_once(':') {
-                            if let Some(callback) = self.handlers.lock().unwrap().get(event) {
-                                callback(""); // Call handler (pass empty string as data)
-                            }
-                        }
+                let cloned = stream.lock().unwrap().try_clone();
+                let Ok(stream) = cloned else {
+                    return;
+                };
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    let read = reader.read_line(&mut line);
+                    let Ok(bytes) = read else {
+                        break;
+                    };
+                    if bytes == 0 {
+                        break;
+                    }
+
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    let (event, payload) = match trimmed.split_once(':') {
+                        Some((event, payload)) => (event, payload),
+                        None => (trimmed, ""),
+                    };
+
+                    if let Some(callback) = self.handlers.lock().unwrap().get(event) {
+                        let payload_bytes = general_purpose::STANDARD
+                            .decode(payload)
+                            .unwrap_or_else(|_| payload.as_bytes().to_vec());
+                        callback(&payload_bytes);
                     }
                 }
             }
         }
-        
     }
 
     #[cfg(test)]
@@ -167,42 +170,21 @@ pub mod net {
         use super::*;
 
         #[test]
-        fn test_stable_socket_ids() {
-            let addr = "127.0.0.1:8080";
-            let id1 = Socket::generate_stable_id(addr);
-            let id2 = Socket::generate_stable_id(addr);
-            assert_eq!(id1, id2, "Same address should generate same ID");
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::net::{self, EasySocketServer};
-    use std::thread;
-
-    #[test]
-    fn test_tcp_server_client() {
-        thread::spawn(|| {
-            let server = EasySocketServer::new();
-            server.on("connection", |socket| {
-                socket.on("hello, server", |msg| {
-                    println!("Server received: {}", msg);
+        fn test_tcp_server_client() {
+            thread::spawn(|| {
+                let server = EasySocketServer::new();
+                server.on("connection", |socket| {
+                    socket.on("hello", |msg| {
+                        assert_eq!(msg, "world");
+                    });
+                    socket.on_bytes("bytes", |msg| {
+                        assert_eq!(msg, b"raw");
+                    });
+                    socket.send("bytes", b"raw");
+                    socket.listen_tcp();
                 });
-                socket.emit("hello, client!");
-                socket.listen_tcp();
+                server.listen_tcp("127.0.0.1:4000").unwrap();
             });
-            server.listen_tcp("127.0.0.1:4000").unwrap();
-        });
-
-        thread::sleep(std::time::Duration::from_secs(1)); // Allow server to start
-
-        let client = std::net::TcpStream::connect("127.0.0.1:4000").unwrap();
-        let socket = net::Socket::new_tcp(client);
-        socket.on("hello, client!", |msg| {
-            println!("Client received: {}", msg);
-        });
-        socket.emit("hello, server");
-        socket.listen_tcp();
+        }
     }
 }
