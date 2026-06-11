@@ -140,6 +140,7 @@ pub mod net {
                 if let Ok((size, src)) = udp_socket.recv_from(&mut buffer) {
                     let message = String::from_utf8_lossy(&buffer[..size]).to_string();
                     if let Some(ack_id) = parse_udp_ack(&message) {
+                        #[cfg(feature = "exdebug")]
                         println!("Received UDP ack: {}", ack_id);
                         continue;
                     }
@@ -197,6 +198,7 @@ pub mod net {
                         };
                         dispatch_udp_event(&socket, event, payload);
                     }
+                    #[cfg(feature = "exdebug")]
                     println!("Received: {}", message);
                 }
             }

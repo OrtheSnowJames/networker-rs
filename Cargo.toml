@@ -1,6 +1,6 @@
 [package]
 name = "networker-rs"
-version = "0.1.8"
+version = "0.1.9"
 authors = ["James Yacoube <jamesyacoube@yahoo.com>"]
 edition = "2021"
 description = "A Rust library providing TCP, UDP, and HTTP easier calls."
@@ -10,6 +10,9 @@ homepage = "https://github.com/OrtheSnowJames/networker-rs"
 keywords = ["networking", "tcp", "udp"]
 categories = ["network-programming", "web-programming"]
 readme = "README.md"
+
+[features]
+exdebug = []
 
 [dependencies]
 base64 = "0.22.1"
